@@ -6,7 +6,7 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 puppeteer.use(StealthPlugin());
 
 const MAX_LENGTH = 100; // characters
-const DELAY_BETWEEN_ANSWERS = 600; // ms
+const DELAY_BETWEEN_ANSWERS = 2000; // ms
 
 const ANSWER_DATA_FILE = "answerData.json";
 
@@ -42,7 +42,11 @@ function saveAnswerData() {
     console.log("Answer data saved to answerData.json");
 }
 
-function getPrompt(previousGuesses, currentGuess) {
+function joinWithLast(arr: string[], lastWord: string) {
+    return `${arr.slice(0, arr.length - 1).join(", ")}, ${lastWord} ${arr[arr.length - 1]}`;
+}
+
+function getPrompt(previousGuesses: string[], currentGuess: string, doNotAnswerWith: string[] = []) {
 //     return `Determine an item or concept that would beat "${currentGuess}" \
 // in an alternative, extreme, version of Rock Paper Scissors where any move can be made. \
 // Be creative and do not repeat answers. Do not add punctuation to your answer. \
@@ -68,6 +72,7 @@ Be creative and do not repeat answers. Do not add punctuation to your answer. \
 Keep your answers relatively short, simple, and ensure you'll acquire a decisive win! \
 Previous answers include ${previousGuesses.slice(0, previousGuesses.length - 1).map(e => `"${e}"`).join(", ")}, and "rock"; \
 DO NOT repeat these. As an example, "drought" could beat "water", and "rust" could beat "scissors". \
+${doNotAnswerWith.length > 0 ? `DO NOT answer with ${joinWithLast(doNotAnswerWith.map(e => `"${e}"`), "or")}. ` : ""}\
 Answer with only the item or concept; do not add extra text. \
 What would beat "${currentGuess}" in this game?`;
 }
@@ -85,12 +90,30 @@ const browser = await puppeteer.connect({
 /**
  * Calculates the longest possible answer chain starting with the given answer.
  */
-function calculateAnswerOrder(startingAnswer: string, previousAnswers: string[]): string[] {
-    const possibleAnswers = answerData.correctAnswerMap.filter(e => e[0] === startingAnswer).map(e => e[1]).filter(e => !previousAnswers.includes(e));
+function calculateAnswerOrder(): string[] {
+    // For performance, remove any nodes that don't have nodes pointing to them.
+    const correctAnswerMap = answerData.correctAnswerMap.slice();
+    let changed = true;
+    while(changed) {
+        changed = false;
+        for(const answer of correctAnswerMap.map(e => e[1])) {
+            if(!correctAnswerMap.some(e => e[0] === answer)) {
+                correctAnswerMap.splice(correctAnswerMap.findIndex(e => e[1] === answer), 1);
+                changed = true;
+            }
+        }
+    }
+    
+    console.log("Correct answer map pruned.");
+
+    return calculateAnswerOrderInner(correctAnswerMap, "rock", ["rock"]); // Starting with rock
+}
+function calculateAnswerOrderInner(correctAnswerMap: [string, string][], startingAnswer: string, previousAnswers: string[]): string[] {
+    const possibleAnswers = correctAnswerMap.filter(e => e[0] === startingAnswer).map(e => e[1]).filter(e => !previousAnswers.includes(e));
 
     let longestChain: string[] = [];
     for(const answer of possibleAnswers) {
-        const chain = calculateAnswerOrder(answer, [...previousAnswers, startingAnswer]);
+        const chain = calculateAnswerOrderInner(correctAnswerMap, answer, [...previousAnswers, startingAnswer]);
         if(chain.length > longestChain.length) {
             longestChain = chain;
         }
@@ -100,10 +123,12 @@ function calculateAnswerOrder(startingAnswer: string, previousAnswers: string[])
 }
 
 let finalRun = process.argv[3] === "finalRun";
+let explorationMode = process.argv[3] === "explorationMode";
+
 let answerOrder: string[] = [];
 if(finalRun) {
     const startTime = Date.now();
-    answerOrder = calculateAnswerOrder("rock", ["rock"]).slice(1); // We don't answer with "rock".
+    answerOrder = calculateAnswerOrder().slice(1); // We don't answer with "rock".
     console.log(`Preprocessed final run answer chain in ${Date.now() - startTime}ms.`);
     console.log(`Answer chain: ${answerOrder.join(" -> ")}`);
     console.log(`\n\n\n    Final answer chain predicted length: ${answerOrder.length}\n\n\n`);
@@ -111,7 +136,14 @@ if(finalRun) {
     await new Promise(resolve => setTimeout(resolve, 2000));
 }
 
-async function getNextAnswer(previousGuesses, currentGuess) {
+/**
+ * Gets the next answer to use.  
+ * Returns null if the page should be reloaded (no answers could be found).  
+ * @param previousGuesses 
+ * @param currentGuess 
+ * @returns 
+ */
+async function getNextAnswer(previousGuesses, currentGuess): Promise<string | null> {
     if(finalRun) {
         const nextAnswer = answerOrder.shift();
         if(nextAnswer === undefined) {
@@ -120,8 +152,25 @@ async function getNextAnswer(previousGuesses, currentGuess) {
         } else return nextAnswer;
     }
 
-    const prompt = getPrompt(previousGuesses, currentGuess);
+    if(explorationMode) {
+        // Pick a random known correct answer if any are available.
+        // If not available, turn off exploration mode and continue with AI-generated answers.
+
+        const knownCorrectAnswers = answerData.correctAnswerMap.filter(e => e[0] === currentGuess).map(e => e[1]).filter(e => !previousGuesses.includes(e));
+        if(knownCorrectAnswers.length > 0) {
+            const nextAnswer = knownCorrectAnswers[Math.floor(Math.random() * knownCorrectAnswers.length)];
+            console.log(`Exploration mode enabled. Answering with known correct answer ${nextAnswer}.`);
+            return nextAnswer;
+        } else {
+            console.log("Exploration mode enabled. No known correct answers found. Disabling exploration mode.");
+            explorationMode = false;
+        }
+    }
+
+    let prompt = getPrompt(previousGuesses, currentGuess);
     console.log(`Prompt: ${prompt}`);
+
+    let doNotUseAnswers = [];
 
     let output, i = 1;
     while(
@@ -143,6 +192,22 @@ async function getNextAnswer(previousGuesses, currentGuess) {
         DISALLOWED_PHRASES.some(e => output.includes(e))
     ) {
         console.log(`Generation attempt ${i++}`);
+        if(i > 20) {
+            console.error(`Failed to generate a new answer after 20 attempts. Latest answer: ${output}.`);
+            // Pick a random known correct answer if any are available.
+            const knownCorrectAnswers = answerData.correctAnswerMap.filter(e => e[0] === currentGuess).map(e => e[1]);
+            if(knownCorrectAnswers.length > 0) {
+                output = knownCorrectAnswers[Math.floor(Math.random() * knownCorrectAnswers.length)];
+            } else {
+                return null;
+            }
+        }
+
+        if(i > 5) {
+            doNotUseAnswers.push(output);
+            prompt = getPrompt(previousGuesses, currentGuess, doNotUseAnswers);
+        }
+
         output = execSync(`ollama run llama3.1 '${prompt.replace("'", '')}'`).toString().toLowerCase();
         output = output.split("\n")[0].trim();
     }
@@ -152,14 +217,26 @@ async function getNextAnswer(previousGuesses, currentGuess) {
     return output;
 }
 
+let shouldWaitReasons = new Set<string>();
+async function waitIfRequired() {
+    while(shouldWaitReasons.size > 0) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+}
+
 async function run() {
     const page = await browser.newPage();
-    
+
+    let pageNotReloadTimeout: NodeJS.Timeout = null;
     page.on('load', async () => {
+        if(pageNotReloadTimeout) {
+            clearTimeout(pageNotReloadTimeout);
+            pageNotReloadTimeout = null;
+        }
+
         if(await page.url() !== "https://www.whatbeatsrock.com/") {
             return;
         }
-        console.log(await page.url());
 
         const previousGuessSelector = "div.justify-start.relative > div:nth-child(6) > p";
         const currentGuessSelector = "div.justify-start.relative > p.text-2xl.text-center";
@@ -187,58 +264,132 @@ async function run() {
             return await page.evaluate(`document.querySelector("${currentGuessSelector}").innerText.slice(0, -1).toLowerCase()`) as string;
         }
 
+        const attemptReloadOnError = async () => {
+            console.log("Error occurred. Reloading page and trying to continue in 3 seconds...");
+
+            await waitIfRequired();
+
+            let reloads = 0;
+            const reload = async () => {
+                if(pageNotReloadTimeout) clearTimeout(pageNotReloadTimeout);
+                pageNotReloadTimeout = setTimeout(() => {
+                    if(reloads++ >= 5) {
+                        console.error("Page failed to reload after 5 attempts. Exiting.");
+                        process.exit(1);
+                    }
+                    
+                    console.error("Page failed to reload after 5 seconds. Trying again in 10 seconds.");
+                    setTimeout(reload, 10000);
+                }, 5000);
+                await page.reload();
+            };
+            setTimeout(reload, 3000);
+        }
+
         async function respond() {
-            const previousAnswers = await getCorrectAnswerList();
-            if(previousAnswers.length === 0) {
-                console.log("No previous answers found. Only using 'rock'.");
-            }
-
-            const currentGuess = await getCurrentGuess();
-
-            const nextAnswer = await getNextAnswer(previousAnswers, currentGuess);
-            await page.locator(inputSelector).fill(nextAnswer);
-            
-            console.log(`Answer filled; submitting...`);
-
-            await page.locator(goSelector).click();
-            await Promise.race([
-                page.waitForSelector(doesNotBeatSelector),
-                page.waitForSelector(beatsSelector)
-            ]);
-
-            if(await page.$(doesNotBeatSelector) !== null) { // Failure
-                const answers = await getCorrectAnswerList();
-                console.log(`\x1b[1;31mIncorrectly answered ${currentGuess} with ${nextAnswer}.\x1b[0m Correct answer streak: \n    ${answers.join(" -> ")}`);
-
-                if(answerData.correctAnswerMap.find(e => e[0] === currentGuess && e[1] === nextAnswer)) {
-                    answerData.correctAnswerMap = answerData.correctAnswerMap.filter(e => e[0] !== currentGuess || e[1] !== nextAnswer);
+            try {
+                const previousAnswers = await getCorrectAnswerList();
+                if(previousAnswers.length === 0) {
+                    console.log("No previous answers found. Only using 'rock'.");
                 }
-                answerData.incorrectAnswerMap.push([currentGuess, nextAnswer]);
-                answerData.correctAnswerMap.push([nextAnswer, currentGuess]);
-                saveAnswerData();
 
-                await page.locator(playAgainSelector).click(); // The page will reload, which will run the load event and replay the game.
-            } else { // Success
-                const answers = await getCorrectAnswerList();
-                console.log(`\x1b[1;32mSuccessfully answered ${currentGuess} with ${nextAnswer}!\x1b[0m Correct answer streak: \n    ${answers.join(" -> ")}`);
+                const currentGuess = await getCurrentGuess();
 
-                if(answerData.incorrectAnswerMap.find(e => e[0] === currentGuess && e[1] === nextAnswer)) {
-                    answerData.incorrectAnswerMap = answerData.incorrectAnswerMap.filter(e => e[0] !== currentGuess || e[1] !== nextAnswer);
+                let nextAnswer = await getNextAnswer(previousAnswers, currentGuess);
+
+                if(nextAnswer === null) {
+                    if(currentGuess === "rock") {
+                        console.log("No more chains could be found stemming from rock! Entering exploration mode.");
+                        explorationMode = true;
+                        nextAnswer = await getNextAnswer(previousAnswers, currentGuess);
+                        if(nextAnswer === null) {
+                            console.log("No answer could be found after enabling exploration mode. Reloading page.");
+                            attemptReloadOnError();
+                            return;
+                        }
+                    } else {
+                        console.log("No answer could be found. Reloading page.");
+                        attemptReloadOnError();
+                        return;
+                    }
                 }
-                answerData.correctAnswerMap.push([currentGuess, nextAnswer]);
-                answerData.incorrectAnswerMap.push([nextAnswer, currentGuess]);
-                saveAnswerData();
 
-                await page.locator(nextSelector).click();
-                setTimeout(respond, DELAY_BETWEEN_ANSWERS);
+                await page.locator(inputSelector).fill(nextAnswer);
+                
+                console.log(`Answer filled; submitting...`);
+
+                await waitIfRequired();
+                await page.locator(goSelector).click();
+                await Promise.race([
+                    page.waitForSelector(doesNotBeatSelector),
+                    page.waitForSelector(beatsSelector)
+                ]);
+
+                if(await page.$(doesNotBeatSelector) !== null) { // Failure
+                    const answers = await getCorrectAnswerList();
+                    console.log(`\x1b[1;31mIncorrectly answered ${currentGuess} with ${nextAnswer}.\x1b[0m Correct answer streak: \n    ${answers.join(" -> ")}`);
+
+                    if(answerData.correctAnswerMap.find(e => e[0] === currentGuess && e[1] === nextAnswer)) {
+                        answerData.correctAnswerMap = answerData.correctAnswerMap.filter(e => e[0] !== currentGuess || e[1] !== nextAnswer);
+                    }
+                    answerData.incorrectAnswerMap.push([currentGuess, nextAnswer]);
+                    answerData.correctAnswerMap.push([nextAnswer, currentGuess]);
+                    saveAnswerData();
+
+                    let reloads = 0;
+                    const clickPlayAgain = async () => {
+                        try {
+                            await page.locator(playAgainSelector).click(); // The page will reload, which will run the load event and replay the game.
+                            if(pageNotReloadTimeout) clearTimeout(pageNotReloadTimeout);
+                            pageNotReloadTimeout = setTimeout(clickPlayAgain, 500); // In case the page doesn't reload, keep trying until it does.
+
+                            if(reloads++ >= 5) console.log(`Failed to click play again after ${reloads} attempts. Continuing to try.`);
+                        } catch(e) {
+                            console.error(e);
+                            attemptReloadOnError();
+                        }
+                    };
+                    await clickPlayAgain();
+                } else { // Success
+                    const answers = await getCorrectAnswerList();
+                    console.log(`\x1b[1;32mSuccessfully answered ${currentGuess} with ${nextAnswer}!\x1b[0m Correct answer streak: \n    ${answers.join(" -> ")}`);
+
+                    if(answerData.incorrectAnswerMap.find(e => e[0] === currentGuess && e[1] === nextAnswer)) {
+                        answerData.incorrectAnswerMap = answerData.incorrectAnswerMap.filter(e => e[0] !== currentGuess || e[1] !== nextAnswer);
+                    }
+                    answerData.correctAnswerMap.push([currentGuess, nextAnswer]);
+                    answerData.incorrectAnswerMap.push([nextAnswer, currentGuess]);
+                    saveAnswerData();
+
+                    await page.locator(nextSelector).click();
+                    setTimeout(respond, DELAY_BETWEEN_ANSWERS);
+                }
+            } catch(e) {
+                console.error(e);
+                attemptReloadOnError();
             }
         }
 
         respond();
     });
 
+    page.on('dialog', async dialog => {
+        console.log('Got dialog');
+
+        shouldWaitReasons.add(dialog.message());
+        
+        if(dialog.message().includes("rate limit")) {
+            console.log("\x1b[1;31mHit rate limit! Waiting 30 seconds and trying again.\x1b[0m");
+            await new Promise(resolve => setTimeout(resolve, 30_000));
+        }
+
+        shouldWaitReasons.delete(dialog.message());
+
+        await dialog.accept();
+    });      
+
     await page.goto('https://whatbeatsrock.com/');
-    await page.setViewport({ width: 952, height: 958 });
+    await page.setViewport({ width: 952, height: 2000 });
 }
 
 run();
