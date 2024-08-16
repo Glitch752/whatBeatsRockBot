@@ -5,10 +5,10 @@ import child_process from 'child_process';
 const FILE_TYPE: string = 'png';
 // Good options: dot, neato, fdp, sfdp, twopi, circo
 // twopi in particular makes pretty readable graphs
-const LAYOUT_ENGINE: string = 'dot';
+const LAYOUT_ENGINE: string = 'fdp';
 const GENERATE_INCORRECT_EDGES = false;
 const VERBOSE = false;
-const LIMIT = -1; // The maximum number of correct answer pairs to load, or -1 for no limit
+const LIMIT: number = -1; // The maximum number of correct answer pairs to load, or -1 for no limit
 
 const answerData: AnswerData = JSON.parse(fs.readFileSync(ANSWER_DATA_FILE, 'utf8'));
 
@@ -30,13 +30,14 @@ function randomColor() {
 
 const dotGraph = `digraph {
     rankdir=LR;
-    overlap="vpsc";
+    # overlap="vpsc";
     concentrate=true;
-    sep="+15";
+    # sep="+20";
     splines=${LAYOUT_ENGINE === "fdp" ? "compound" : "true"};
 
-    K=1.0; # Spring constant, only used by fdp and sfdp
-    repulsiveforce=1.5; # Repulsive force, only used by sfdp
+    K=1.5; # Spring constant, only used by fdp and sfdp
+    repulsiveforce=5.0; # Repulsive force, only used by sfdp
+    maxiter=20; # Maximum number of iterations, only used by sfdp
     
     # Dark theme
     bgcolor=gray12;

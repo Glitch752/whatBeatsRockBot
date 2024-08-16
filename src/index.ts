@@ -33,6 +33,10 @@ const answerData: AnswerData = JSON.parse(fs.readFileSync(ANSWER_DATA_FILE).toSt
 fs.cpSync(ANSWER_DATA_FILE, "answerDataBackup.json", { force: true });
 
 function saveAnswerData() {
+    // Deduplicate correctAnswerMap and incorrectAnswerMap
+    answerData.correctAnswerMap = answerData.correctAnswerMap.filter((e, i) => answerData.correctAnswerMap.findIndex(f => f[0] === e[0] && f[1] === e[1]) === i);
+    answerData.incorrectAnswerMap = answerData.incorrectAnswerMap.filter((e, i) => answerData.incorrectAnswerMap.findIndex(f => f[0] === e[0] && f[1] === e[1]) === i);
+
     fs.writeFileSync(ANSWER_DATA_FILE, JSON.stringify(answerData));
     console.log("Answer data saved to answerData.json");
 }
@@ -103,7 +107,17 @@ function calculateAnswerOrder(): string[] {
 
     return calculateAnswerOrderInner(correctAnswerMap, "rock", ["rock"]); // Starting with rock
 }
+
+const answerOrderCache: { [key: string]: string[] } = {};
 function calculateAnswerOrderInner(correctAnswerMap: [string, string][], startingAnswer: string, previousAnswers: string[]): string[] {
+    const cacheKey = startingAnswer;
+    if(answerOrderCache[cacheKey]) {
+        const cached = answerOrderCache[cacheKey];
+        if(cached.filter(e => previousAnswers.includes(e)).length === 0) {
+            return cached;
+        }
+    }
+
     const possibleAnswers = correctAnswerMap.filter(e => e[0] === startingAnswer).map(e => e[1]).filter(e => !previousAnswers.includes(e));
 
     let longestChain: string[] = [];
@@ -114,15 +128,17 @@ function calculateAnswerOrderInner(correctAnswerMap: [string, string][], startin
         }
     }
 
+    answerOrderCache[cacheKey] = [startingAnswer, ...longestChain];
     return [startingAnswer, ...longestChain];
 }
 
-let finalRun = process.argv[3] === "finalRun";
-let explorationMode = process.argv[3] === "explorationMode";
+let finalRun = process.argv[2] === "finalRun";
+let explorationMode = process.argv[2] === "explorationMode";
 
 let answerOrder: string[] = [];
 if(finalRun) {
     const startTime = Date.now();
+    console.log("Starting final run; calculating longest answer chain...");
     answerOrder = calculateAnswerOrder().slice(1); // We don't answer with "rock".
     console.log(`Preprocessed final run answer chain in ${Date.now() - startTime}ms.`);
     console.log(`Answer chain: ${answerOrder.join(" -> ")}`);
@@ -230,6 +246,10 @@ async function run() {
         }
 
         if(await page.url() !== "https://www.whatbeatsrock.com/") {
+            if(await page.url().startsWith("https://www.whatbeatsrock.com/")) {
+                console.log("Page loaded to a different path. Reloading...");
+                await page.goto('https://whatbeatsrock.com/');
+            }
             return;
         }
 
@@ -323,6 +343,11 @@ async function run() {
                 if(await page.$(doesNotBeatSelector) !== null) { // Failure
                     const answers = await getCorrectAnswerList();
                     console.log(`\x1b[1;31mIncorrectly answered ${currentGuess} with ${nextAnswer}.\x1b[0m Correct answer streak: \n    ${answers.join(" -> ")}`);
+
+                    if(finalRun) {
+                        console.log(`Final run finished with a length of ${answers.length}. Exiting.`);
+                        process.exit(0);
+                    }
 
                     if(answerData.correctAnswerMap.find(e => e[0] === currentGuess && e[1] === nextAnswer)) {
                         answerData.correctAnswerMap = answerData.correctAnswerMap.filter(e => e[0] !== currentGuess || e[1] !== nextAnswer);
