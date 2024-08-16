@@ -2,3 +2,5 @@ node_modules
 
 answerData.json
 answerDataBackup.json
+
+graph*.*

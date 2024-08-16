@@ -3,12 +3,11 @@ import fs from "fs";
 import puppeteer from "puppeteer-extra";
 
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { ANSWER_DATA_FILE, AnswerData } from './answerData';
 puppeteer.use(StealthPlugin());
 
 const MAX_LENGTH = 100; // characters
 const DELAY_BETWEEN_ANSWERS = 2000; // ms
-
-const ANSWER_DATA_FILE = "answerData.json";
 
 const DISALLOWED_PHRASES = [
     "would beat",
@@ -24,10 +23,6 @@ const DISALLOWED_PHRASES = [
     "i answer"
 ];
 
-type AnswerData = {
-    correctAnswerMap: [string, string][],
-    incorrectAnswerMap: [string, string][]
-};
 if(!fs.existsSync(ANSWER_DATA_FILE)) {
     fs.writeFileSync(ANSWER_DATA_FILE, JSON.stringify({
         correctAnswerMap: [],
@@ -379,8 +374,8 @@ async function run() {
         shouldWaitReasons.add(dialog.message());
         
         if(dialog.message().includes("rate limit")) {
-            console.log("\x1b[1;31mHit rate limit! Waiting 30 seconds and trying again.\x1b[0m");
-            await new Promise(resolve => setTimeout(resolve, 30_000));
+            console.log("\x1b[1;31mHit rate limit! Waiting 10 minutes and trying again.\x1b[0m");
+            await new Promise(resolve => setTimeout(resolve, 1000 * 60 * 10));
         }
 
         shouldWaitReasons.delete(dialog.message());
